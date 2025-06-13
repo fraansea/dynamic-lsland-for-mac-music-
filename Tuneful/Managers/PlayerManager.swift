@@ -11,6 +11,7 @@ import Combine
 import ISSoundAdditions
 import ScriptingBridge
 import Defaults
+import Foundation
 
 public class PlayerManager: ObservableObject {
     var musicApp: PlayerProtocol!
@@ -77,16 +78,28 @@ public class PlayerManager: ObservableObject {
     // Notch
     private var notchInfo: DynamicNotchInfo!
     
+    @Published private(set) var currentTrack: Track?
+    @Published private(set) var currentPlayer: PlayerProtocol?
+    
+    private var updateTimer: Timer?
+    private var trackCache: [String: Track] = [:]
+    private let updateQueue = DispatchQueue(label: "com.tuneful.playerupdate", qos: .userInteractive)
+    private let cacheQueue = DispatchQueue(label: "com.tuneful.cache", qos: .utility)
+    
     init() {
-        // Music app and observers
-        self.playerAppProvider = PlayerAppProvider(notificationSubject: self.notificationSubject)
+        self.playerAppProvider = PlayerAppProvider()
         self.notchInfo = DynamicNotchInfo(playerManager: self)
         self.setupMusicAppsAndObservers()
         self.playStateOrTrackDidChange(nil)
+        setupPlayerMonitoring()
+        startUpdateTimer()
+        setupNotifications()
     }
     
     deinit {
         observer?.invalidate()
+        updateTimer?.invalidate()
+        NotificationCenter.default.removeObserver(self)
     }
     
     // MARK: Setup
@@ -271,25 +284,23 @@ public class PlayerManager: ObservableObject {
     // MARK: Controls
 
     func togglePlayPause() {
-        isPlaying = !isPlaying
-        musicApp.playPause()
+        Task {
+            await currentPlayer?.togglePlayPause()
+            updateTrackInfo()
+        }
     }
 
     func previousTrack() {
-        if track.isPodcast {
-            self.seekerPosition = seekerPosition - Constants.podcastRewindDurationSec
-            self.seekTrack()
-        } else {
-            musicApp.previousTrack()
+        Task {
+            await currentPlayer?.previousTrack()
+            updateTrackInfo()
         }
     }
 
     func nextTrack() {
-        if track.isPodcast {
-            self.seekerPosition = seekerPosition + Constants.podcastRewindDurationSec
-            self.seekTrack()
-        } else {
-            musicApp.nextTrack()
+        Task {
+            await currentPlayer?.nextTrack()
+            updateTrackInfo()
         }
     }
 
@@ -441,5 +452,68 @@ public class PlayerManager: ObservableObject {
     
     func initializeNotch() {
         notchInfo.initializeNotchWindow()
+    }
+    
+    private func setupPlayerMonitoring() {
+        playerAppProvider.$currentPlayer
+            .receive(on: updateQueue)
+            .sink { [weak self] player in
+                self?.currentPlayer = player
+                self?.updateTrackInfo()
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func setupNotifications() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppDidBecomeActive),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+    
+    private func startUpdateTimer() {
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.updateTrackInfo()
+        }
+        RunLoop.current.add(updateTimer!, forMode: .common)
+    }
+    
+    private func updateTrackInfo() {
+        guard let player = currentPlayer else { return }
+        
+        Task { @MainActor in
+            async let track = player.getCurrentTrack()
+            async let isPlaying = player.isPlaying()
+            async let position = player.getPlaybackPosition()
+            async let vol = player.getVolume()
+            
+            let (newTrack, playing, pos, vol) = await (track, isPlaying, position, vol)
+            
+            if let newTrack = newTrack {
+                cacheTrack(newTrack)
+            }
+            
+            self.currentTrack = newTrack
+            self.isPlaying = playing
+            self.seekerPosition = pos
+            self.volume = vol
+        }
+    }
+    
+    private func cacheTrack(_ track: Track) {
+        cacheQueue.async { [weak self] in
+            self?.trackCache[track.id] = track
+            // Keep cache size manageable
+            if self?.trackCache.count ?? 0 > 100 {
+                self?.trackCache.removeValue(forKey: self?.trackCache.keys.first ?? "")
+            }
+        }
+    }
+    
+    // MARK: - Notification Handlers
+    @objc private func handleAppDidBecomeActive() {
+        updateTrackInfo()
     }
 }

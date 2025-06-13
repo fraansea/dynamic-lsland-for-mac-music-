@@ -8,30 +8,65 @@
 import SwiftUI
 import AppKit
 import Defaults
+import Combine
 
 class MiniPlayerWindow: NSWindow {
-    init() {
+    private var cancellables = Set<AnyCancellable>()
+    private let playerManager: PlayerManager
+    
+    init(playerManager: PlayerManager) {
+        self.playerManager = playerManager
+        
         super.init(
-            contentRect: .zero,
-            styleMask: [.fullSizeContentView, .borderless, .utilityWindow, .nonactivatingPanel],
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
+            styleMask: [.borderless],
             backing: .buffered,
-            defer: true
+            defer: false
         )
         
-        self.isOpaque = false
-        self.isMovableByWindowBackground = true
-        self.level = Defaults[.miniPlayerWindowOnTop] ? .floating : .normal
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenNone]
-        self.isReleasedWhenClosed = false
-        self.backgroundColor = NSColor.clear
-        self.hasShadow = true
+        setupWindow()
+        setupPlayerMonitoring()
+    }
+    
+    private func setupWindow() {
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .stationary]
         
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(windowDidMove),
-            name: NSWindow.didMoveNotification,
-            object: self
+        contentView = NSHostingView(
+            rootView: MiniPlayerView(playerManager: playerManager)
+                .frame(width: 300, height: 100)
         )
+    }
+    
+    private func setupPlayerMonitoring() {
+        playerManager.$currentTrack
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] track in
+                self?.updateWindow(with: track)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func updateWindow(with track: Track?) {
+        guard let track = track else {
+            orderOut(nil)
+            return
+        }
+        
+        if !isVisible {
+            makeKeyAndOrderFront(nil)
+        }
+    }
+    
+    func show() {
+        makeKeyAndOrderFront(nil)
+    }
+    
+    func hide() {
+        orderOut(nil)
     }
     
     override var canBecomeKey: Bool {
@@ -142,11 +177,6 @@ class MiniPlayerWindow: NSWindow {
     
     @objc func quit(_ sender: Any?) {
         NSApplication.shared.sendAction(#selector(AppDelegate.quit), to: nil, from: nil)
-    }
-    
-    @objc func windowDidMove(_ notification: Notification) {
-        let position = self.frame.origin
-        Defaults[.windowPosition] = "\(position.x),\(position.y)"
     }
     
     deinit {

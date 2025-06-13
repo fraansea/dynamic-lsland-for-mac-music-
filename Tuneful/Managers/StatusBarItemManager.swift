@@ -6,13 +6,125 @@
 //
 
 import SwiftUI
-import Defaults
+import Combine
+import AppKit
 
 class StatusBarItemManager: ObservableObject {
-    @ObservedObject var playerManager: PlayerManager
+    // MARK: - Published Properties
+    @Published private(set) var statusBarItem: NSStatusItem?
+    @Published private(set) var isVisible = false
+    @Published private(set) var currentTitle: String = ""
     
+    // MARK: - Private Properties
+    private var cancellables = Set<AnyCancellable>()
+    private let playerManager: PlayerManager
+    private let updateQueue = DispatchQueue(label: "com.tuneful.statusbar", qos: .userInteractive)
+    private var titleUpdateWorkItem: DispatchWorkItem?
+    private let maxTitleLength = 50
+    
+    // MARK: - Initialization
     init(playerManager: PlayerManager) {
         self.playerManager = playerManager
+        setupStatusBarItem()
+        setupPlayerMonitoring()
+    }
+    
+    deinit {
+        titleUpdateWorkItem?.cancel()
+        statusBarItem = nil
+    }
+    
+    // MARK: - Setup Methods
+    private func setupStatusBarItem() {
+        statusBarItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        
+        if let button = statusBarItem?.button {
+            button.image = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Tuneful")
+            button.imagePosition = .imageLeft
+            button.imageScaling = .scaleProportionallyDown
+            button.target = self
+            button.action = #selector(statusBarButtonClicked)
+        }
+    }
+    
+    private func setupPlayerMonitoring() {
+        playerManager.$currentTrack
+            .receive(on: updateQueue)
+            .sink { [weak self] track in
+                self?.updateStatusBarItem(with: track)
+            }
+            .store(in: &cancellables)
+        
+        playerManager.$isPlaying
+            .receive(on: updateQueue)
+            .sink { [weak self] isPlaying in
+                self?.updatePlaybackState(isPlaying)
+            }
+            .store(in: &cancellables)
+    }
+    
+    // MARK: - Update Methods
+    private func updateStatusBarItem(with track: Track?) {
+        titleUpdateWorkItem?.cancel()
+        
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            
+            if let track = track {
+                let title = self.formatTitle(track)
+                DispatchQueue.main.async {
+                    self.currentTitle = title
+                    self.statusBarItem?.button?.title = title
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.currentTitle = ""
+                    self.statusBarItem?.button?.title = ""
+                }
+            }
+        }
+        
+        titleUpdateWorkItem = workItem
+        updateQueue.async(execute: workItem)
+    }
+    
+    private func updatePlaybackState(_ isPlaying: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            if let button = self.statusBarItem?.button {
+                let imageName = isPlaying ? "music.note" : "music.note.list"
+                button.image = NSImage(systemSymbolName: imageName, accessibilityDescription: "Tuneful")
+            }
+        }
+    }
+    
+    private func formatTitle(_ track: Track) -> String {
+        let title = "\(track.title) - \(track.artist)"
+        if title.count > maxTitleLength {
+            return String(title.prefix(maxTitleLength)) + "..."
+        }
+        return title
+    }
+    
+    // MARK: - Public Methods
+    func show() {
+        DispatchQueue.main.async { [weak self] in
+            self?.isVisible = true
+            self?.statusBarItem?.isVisible = true
+        }
+    }
+    
+    func hide() {
+        DispatchQueue.main.async { [weak self] in
+            self?.isVisible = false
+            self?.statusBarItem?.isVisible = false
+        }
+    }
+    
+    // MARK: - Actions
+    @objc private func statusBarButtonClicked() {
+        NotificationCenter.default.post(name: .statusBarButtonClicked, object: nil)
     }
     
     public func getMenuBarView(track: Track, playerAppIsRunning: Bool, isPlaying: Bool) -> NSView {
@@ -118,4 +230,9 @@ class StatusBarItemManager: ObservableObject {
         
         return AnyView(Image(systemName: "music.quarternote.3"))
     }
+}
+
+// MARK: - Notification Names
+extension Notification.Name {
+    static let statusBarButtonClicked = Notification.Name("statusBarButtonClicked")
 }
